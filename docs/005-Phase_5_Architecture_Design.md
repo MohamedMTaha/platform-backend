@@ -555,18 +555,35 @@ Phase 5 is considered complete when:
 
 ---
 
-## Next Phase: Implementation
+## Current Phase: Implementation
 
-Implementation will proceed feature by feature.
+**Phase 5 is complete. The project is now in Implementation. There is no separate API Design phase.**
 
-For each feature, we will:
+Implementation will proceed feature by feature. For each feature:
 
-1. Review its requirements and business rules.
-2. Identify edge cases and failure scenarios.
-3. Design its API.
-4. Implement the required backend behavior.
-5. Implement database interactions and transactions.
-6. Write meaningful tests.
-7. Review the implementation and its tradeoffs.
+1. Re-read the relevant requirements and business rules.
+2. Identify edge cases, authorization requirements, and failure scenarios.
+3. Design the required API contract for this feature (routes, inputs, outputs, and errors) only as much as needed to implement it.
+4. Implement the business logic and persistence.
+5. Add unit/integration tests for meaningful behavior.
+6. Review data consistency, security, failure handling, and tradeoffs.
 
-Architecture decisions may be revisited when implementation reveals a genuine issue, but changes must be intentional and documented.
+API design is part of feature implementation, not a standalone phase or a reason to delay coding. Architecture decisions may be revisited when implementation reveals a genuine issue, but changes must be intentional and documented.
+
+
+---
+
+## Latest Confirmed Decisions — 2026-11-17
+
+This section supersedes any conflicting earlier wording in this document. It records decisions confirmed after the original phase review.
+
+- **Project status:** Product definition, requirements, business rules, domain/database design, and architecture are complete enough to begin implementation. The project is now in **Implementation**. There is no separate API Design phase/gate. API contracts and endpoint details will be designed incrementally as each feature is implemented, after reviewing that feature's requirements and business rules.
+- **Exam randomization:** Questions and options are randomized, but their per-attempt display order is **not persisted**. Do not create `exam_attempt_questions` or `exam_attempt_options` tables. The database does not promise that the same randomized order will be restored after reconnect.
+- **Essay grading:** Keep only the current grading result. Regrading updates the current result; do not create `exam_answer_grading_history` or retain previous grading snapshots. The latest grader/time may be stored with the current answer if required by the implementation, but no grading-history timeline is maintained.
+- **Exam answers:** Create one `exam_answers` row for every question when an attempt starts. Initially the answer fields may be NULL. This makes unanswered questions distinguishable from answered-but-wrong questions.
+- **Exam pass rule:** Passing score is fixed at 50% of the exam's total marks. It is not a configurable per-exam field in the current schema.
+- **Question schema:** The current table names are `assessment_questions` and `assessment_options`, not `exam_questions` and `exam_options`.
+- **Assignment submissions:** Keep one current submission per (`assignment_id`, `enrollment_id`). Resubmission replaces/updates that row; no submission-version history. `is_late` is derived from `submitted_at` and the assignment's immutable `due_at`, not stored as an independent fact.
+- **Cancellation request withdrawal:** A Student may withdraw only a `PENDING` request; withdrawal physically deletes that request. There is no `WITHDRAWN` status. The stored statuses are `PENDING`, `APPROVED`, and `REJECTED`.
+- **Current database baseline:** The available migration set contains 22 migrations, ending with `022_create_exam_answers.sql`. The migrations are the source of truth for what is currently implemented in PostgreSQL; conceptual requirements in these documents remain the source of truth for intended behavior. Any gap between them must be tracked explicitly rather than assumed implemented.
+

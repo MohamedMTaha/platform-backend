@@ -1,7 +1,7 @@
 # LMS — Phase 4: Domain & Database Design
 ## Revised ERD Proposal (MVP)
 
-> **Status:** Consolidated proposal for ERD review. This is a logical database design document, not executable SQL.
+> **Status:** Consolidated database design aligned with the current migration baseline. The migration SQL is the executable source of truth for the current schema; this document explains the model and its rules.
 >
 > **Goal:** Keep the MVP practical while protecting business rules, data integrity, payment consistency, and student history.
 
@@ -59,16 +59,13 @@ erDiagram
     ASSIGNMENTS ||--o{ ASSIGNMENT_SUBMISSIONS : receives
     ENROLLMENTS ||--o{ ASSIGNMENT_SUBMISSIONS : submits
 
-    EXAMS ||--o{ EXAM_QUESTIONS : contains
-    EXAM_QUESTIONS ||--o{ EXAM_OPTIONS : offers
+    EXAMS ||--o{ ASSESSMENT_QUESTIONS : contains
+    ASSESSMENT_QUESTIONS ||--o{ ASSESSMENT_OPTIONS : offers
     ENROLLMENTS ||--o{ EXAM_ATTEMPTS : attempts
     EXAMS ||--o{ EXAM_ATTEMPTS : attempted_as
     EXAM_ATTEMPTS ||--o{ EXAM_ANSWERS : records
-    EXAM_QUESTIONS ||--o{ EXAM_ANSWERS : answered
-    EXAM_OPTIONS o|--o{ EXAM_ANSWERS : selected_option
-    EXAM_ANSWERS ||--o{ EXAM_ANSWER_GRADING_HISTORY : grading_history
-    EXAM_ATTEMPTS ||--o{ EXAM_ATTEMPT_QUESTIONS : ordered_questions
-    EXAM_ATTEMPT_QUESTIONS ||--o{ EXAM_ATTEMPT_OPTIONS : ordered_options
+    ASSESSMENT_QUESTIONS ||--o{ EXAM_ANSWERS : answered
+    ASSESSMENT_OPTIONS o|--o{ EXAM_ANSWERS : selected_option
 
     USERS ||--o{ ASSISTANT_AUDIT_LOGS : performs
 ```
@@ -216,17 +213,17 @@ Assignment definition is immutable immediately after creation. No `assignment_ve
 - `total_marks`
 - Other fixed settings needed by the MVP
 
-#### `exam_questions`
+#### `assessment_questions`
 - `id` — PK
-- `exam_id` — FK → `exams.learning_item_id`
+- `learning_item_id` — FK → `learning_items.id`
 - `type` — `MULTIPLE_CHOICE` / `TRUE_FALSE` / `ESSAY`
 - `question_text`
 - `points`
 - `position`
 
-#### `exam_options`
+#### `assessment_options`
 - `id` — PK
-- `question_id` — FK → `exam_questions.id`
+- `question_id` — FK → `assessment_questions.id`
 - `option_text`
 - `is_correct`
 - `position`
@@ -269,7 +266,7 @@ Allow historical cancelled enrollments and repurchase. Enforce at most one activ
 - `id` — PK
 - `enrollment_id` — FK → `enrollments.id`
 - `reason`
-- `status` — `PENDING` / `APPROVED` / `REJECTED` / `WITHDRAWN`
+- `status` — `PENDING` / `APPROVED` / `REJECTED`
 - `created_at`
 
 Approving a request is not the same as cancelling an enrollment. For student-requested cancellation, the enrollment remains active until the required refund is completed; access is revoked when cancellation is finalized. Keep refund processing separate from the request decision.
@@ -313,49 +310,22 @@ Unique pair: (`assignment_id`, `enrollment_id`) — exactly one current submissi
 - `status` — `IN_PROGRESS` / `SUBMITTED` / `PENDING_GRADING` / `GRADED` / `INVALIDATED`
 - `reset_idempotency_key` — unique key for a reset-created attempt, used to prevent duplicate reset requests from creating multiple opportunities
 
-One attempt by default. An authorized reset creates a new attempt and preserves/invalidates the old attempt; reset reason/action should be audited and duplicate reset requests must be idempotent. The attempt keeps its selected question and option order through the mapping tables below so randomization remains stable on reconnect. Enforce unique (`enrollment_id`, `exam_id`, `attempt_number`).
+One attempt by default. An authorized reset creates a new attempt and preserves/invalidates the old attempt; reset reason/action should be audited and duplicate reset requests must be idempotent. Question and option order is randomized but not persisted per attempt; the database does not guarantee the same display order after reconnect. Enforce unique (`enrollment_id`, `exam_id`, `attempt_number`).
 
 #### `exam_answers`
 - `id` — PK
 - `attempt_id` — FK → `exam_attempts.id`
-- `question_id` — FK → `exam_questions.id`
-- `selected_option_id` — nullable FK → `exam_options.id`
+- `question_id` — FK → `assessment_questions.id`
+- `selected_option_id` — nullable FK → `assessment_options.id`
 - `answer_text` — nullable
 - `is_correct` — nullable
 - `score` — nullable
 
-The schema must prevent duplicate answers for the same (`attempt_id`, `question_id`) and ensure a selected option belongs to the question being answered.
+The schema must prevent duplicate answers for the same (`attempt_id`, `question_id`) and ensure a selected option belongs to the question being answered. Create one answer row for every question when an attempt starts; selected option/answer text initially remain NULL for unanswered questions.
 
-#### `exam_attempt_questions`
-- `id` — PK
-- `attempt_id` — FK → `exam_attempts.id`
-- `question_id` — FK → `exam_questions.id`
-- `display_position`
+**Randomization persistence:** Questions and options are randomized by application behavior, but their per-attempt display order is not stored. There are no `exam_attempt_questions` or `exam_attempt_options` tables.
 
-Unique (`attempt_id`, `question_id`) and (`attempt_id`, `display_position`). This persists the randomized question order for the attempt.
-
-#### `exam_attempt_options`
-- `id` — PK
-- `attempt_question_id` — FK → `exam_attempt_questions.id`
-- `option_id` — FK → `exam_options.id`
-- `display_position`
-
-Unique (`attempt_question_id`, `option_id`) and (`attempt_question_id`, `display_position`). This persists the randomized option order for each question in that attempt.
-
-#### `exam_answer_grading_history`
-- `id` — PK
-- `exam_answer_id` — FK → `exam_answers.id`
-- `previous_score` — nullable
-- `new_score` — nullable
-- `previous_is_correct` — nullable
-- `new_is_correct` — nullable
-- `previous_feedback` — nullable
-- `new_feedback` — nullable
-- `grader_id` — FK → `users.id`
-- `reason` — nullable unless required by the grading workflow
-- `graded_at`
-
-This table is mandatory. Every regrading operation appends a history record preserving the previous result, new result, grader, and timestamp before/currently alongside updating the current answer result. The history is append-only.
+**Essay grading:** `exam_answers` stores the current grading result only. Regrading updates that result; there is no `exam_answer_grading_history` table.
 
 ---
 
@@ -371,7 +341,7 @@ This table is mandatory. Every regrading operation appends a history record pres
 8. Payment attempts exist independently of enrollments until payment success is verified and reconciled.
 9. Learning Item definitions are immutable after creation. Video/File may be hard-deleted only after prerequisite dependents are removed; their progress/detail/item rows are deleted in one DB transaction. Assignment/Exam cannot be edited or deleted.
 10. Assignment submissions are unique per assignment/enrollment and only the latest row is retained.
-11. Exam question/option display order is persisted per attempt; essay grading history is mandatory and append-only.
+11. Exam question/option order is randomized but not persisted per attempt; Essay regrading updates the current result without a separate grading-history table.
 12. Video/File deletion records an object-storage cleanup task transactionally before deleting the database metadata; cleanup is retryable.
 13. Assistant audit records are append-only; required logs should be committed atomically with the operation.
 
@@ -393,4 +363,22 @@ Do not add these just to increase architecture complexity:
 - Redis, queues, or WebSockets before a real use case requires them
 
 ---
+
+
+
+---
+
+## Latest Confirmed Decisions — 2026-11-17
+
+This section supersedes any conflicting earlier wording in this document. It records decisions confirmed after the original phase review.
+
+- **Project status:** Product definition, requirements, business rules, domain/database design, and architecture are complete enough to begin implementation. The project is now in **Implementation**. There is no separate API Design phase/gate. API contracts and endpoint details will be designed incrementally as each feature is implemented, after reviewing that feature's requirements and business rules.
+- **Exam randomization:** Questions and options are randomized, but their per-attempt display order is **not persisted**. Do not create `exam_attempt_questions` or `exam_attempt_options` tables. The database does not promise that the same randomized order will be restored after reconnect.
+- **Essay grading:** Keep only the current grading result. Regrading updates the current result; do not create `exam_answer_grading_history` or retain previous grading snapshots. The latest grader/time may be stored with the current answer if required by the implementation, but no grading-history timeline is maintained.
+- **Exam answers:** Create one `exam_answers` row for every question when an attempt starts. Initially the answer fields may be NULL. This makes unanswered questions distinguishable from answered-but-wrong questions.
+- **Exam pass rule:** Passing score is fixed at 50% of the exam's total marks. It is not a configurable per-exam field in the current schema.
+- **Question schema:** The current table names are `assessment_questions` and `assessment_options`, not `exam_questions` and `exam_options`.
+- **Assignment submissions:** Keep one current submission per (`assignment_id`, `enrollment_id`). Resubmission replaces/updates that row; no submission-version history. `is_late` is derived from `submitted_at` and the assignment's immutable `due_at`, not stored as an independent fact.
+- **Cancellation request withdrawal:** A Student may withdraw only a `PENDING` request; withdrawal physically deletes that request. There is no `WITHDRAWN` status. The stored statuses are `PENDING`, `APPROVED`, and `REJECTED`.
+- **Current database baseline:** The available migration set contains 22 migrations, ending with `022_create_exam_answers.sql`. The migrations are the source of truth for what is currently implemented in PostgreSQL; conceptual requirements in these documents remain the source of truth for intended behavior. Any gap between them must be tracked explicitly rather than assumed implemented.
 

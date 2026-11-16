@@ -59,16 +59,16 @@ Statuses: `PENDING`, `APPROVED`, `REJECTED`, `BANNED`.
 - After cancellation, re-enrollment creates a new independent enrollment with progress starting at 0; old enrollment/history remains.
 
 ### Cancellation
-Statuses: `PENDING`, `APPROVED`, `REJECTED`, `WITHDRAWN`.
-- Student creates cancellation request; cannot directly cancel.
-- Student can withdraw while pending.
-- Admin/Assistant can approve/reject.
+Statuses: `PENDING`, `APPROVED`, `REJECTED`.
+- Student creates a cancellation request; the student cannot directly cancel an Enrollment.
+- Student may withdraw/delete their own request only while it is `PENDING`. Withdrawal physically deletes the request record; no `WITHDRAWN` status or history is retained for a student-withdrawn request.
+- After deleting a pending request, the student may create a new cancellation request for the same Enrollment.
+- Admin/Assistant can approve or reject a pending request.
 - Approval is not itself cancellation; refund/cancellation processing follows.
 - Direct Assistant cancellation is allowed without a request and requires a mandatory reason.
-- Requests are retained for traceability.
-- At most one pending request per enrollment.
-- After withdrawn/rejected, another request may be created.
-- After approved, no new request while cancellation is in progress.
+- At most one pending request per Enrollment.
+- After rejection, another request may be created. A deleted pending request also permits a new request.
+- After approval, no new request while cancellation is in progress.
 - Approval is not actual cancellation. The intended flow is: request APPROVED → refund decision/processing → Enrollment becomes CANCELLED → access is revoked.
 - While a request is APPROVED and cancellation is still in progress, new cancellation requests and repurchase remain blocked until the Enrollment is actually CANCELLED.
 - An Assistant's direct cancellation takes effect by cancelling the Enrollment/revoking access; a mandatory reason is recorded. Refund handling is separate and provider-dependent, and is deferred.
@@ -135,14 +135,14 @@ States: `SUBMITTED`, `UNDER_REVIEW`, `ACCEPTED`, `REJECTED`.
 - MCQ/TF auto-graded; Essay manually graded.
 - Essay may be GRADING_PENDING until final grading.
 - Time limit; server is source of truth; expiry auto-submits.
-- Questions/options randomized at attempt start and fixed for that attempt.
+- Questions/options are randomized; per-attempt display order is not persisted.
 - Connection/device failure resumes same attempt; answers persist.
 - Unanswered and wrong answers are distinct records but both score 0.
 - Passing score: 50%.
 
 ### Academic history
 Student can view academic records.
-Retain exam attempts, scores, question-level results, essay grader/time, and regrading history.
+Retain exam attempts, current scores, question-level results, and the latest Essay grader/time where applicable. Regrading updates the current result; previous grading results are not retained.
 Courses are not deleted or soft-deleted; academic history remains attached to the retained Course and Enrollment records.
 Cancellation does not erase academic history/progress/attempts.
 Re-enrollment creates new progress while old history remains.
@@ -259,3 +259,22 @@ The following decisions were confirmed after the original Phase 2 review and tak
 - Video and File items may be hard-deleted only after all dependent prerequisite relationships are removed. Their progress records are deleted as part of the same database operation.
 - Assignment and Exam items cannot be edited or deleted. No Assignment or Exam versioning exists; create a new item to correct a mistake.
 - A verified successful payment for a valid Payment Attempt creates/reconciles an Enrollment even if the Course has changed from PUBLISHED to DRAFT after the attempt was created. A Payment Attempt may only be initiated while the course is PUBLISHED.
+- A student withdrawing a cancellation request while it is `PENDING` causes the request record to be physically deleted. There is no `WITHDRAWN` status, and student-withdrawn requests are not retained for traceability. Deletion is not allowed after the request has moved to `APPROVED` or `REJECTED`.
+
+
+---
+
+## Latest Confirmed Decisions — 2026-11-17
+
+This section supersedes any conflicting earlier wording in this document. It records decisions confirmed after the original phase review.
+
+- **Project status:** Product definition, requirements, business rules, domain/database design, and architecture are complete enough to begin implementation. The project is now in **Implementation**. There is no separate API Design phase/gate. API contracts and endpoint details will be designed incrementally as each feature is implemented, after reviewing that feature's requirements and business rules.
+- **Exam randomization:** Questions and options are randomized, but their per-attempt display order is **not persisted**. Do not create `exam_attempt_questions` or `exam_attempt_options` tables. The database does not promise that the same randomized order will be restored after reconnect.
+- **Essay grading:** Keep only the current grading result. Regrading updates the current result; do not create `exam_answer_grading_history` or retain previous grading snapshots. The latest grader/time may be stored with the current answer if required by the implementation, but no grading-history timeline is maintained.
+- **Exam answers:** Create one `exam_answers` row for every question when an attempt starts. Initially the answer fields may be NULL. This makes unanswered questions distinguishable from answered-but-wrong questions.
+- **Exam pass rule:** Passing score is fixed at 50% of the exam's total marks. It is not a configurable per-exam field in the current schema.
+- **Question schema:** The current table names are `assessment_questions` and `assessment_options`, not `exam_questions` and `exam_options`.
+- **Assignment submissions:** Keep one current submission per (`assignment_id`, `enrollment_id`). Resubmission replaces/updates that row; no submission-version history. `is_late` is derived from `submitted_at` and the assignment's immutable `due_at`, not stored as an independent fact.
+- **Cancellation request withdrawal:** A Student may withdraw only a `PENDING` request; withdrawal physically deletes that request. There is no `WITHDRAWN` status. The stored statuses are `PENDING`, `APPROVED`, and `REJECTED`.
+- **Current database baseline:** The available migration set contains 22 migrations, ending with `022_create_exam_answers.sql`. The migrations are the source of truth for what is currently implemented in PostgreSQL; conceptual requirements in these documents remain the source of truth for intended behavior. Any gap between them must be tracked explicitly rather than assumed implemented.
+

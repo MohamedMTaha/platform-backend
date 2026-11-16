@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => {
-  res.send("LMS Backend is running");
+  res.send("Platform Backend is running");
 });
 
 export default app;

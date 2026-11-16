@@ -1,7 +1,7 @@
 # LMS — Phase 1: Product Definition
 
 **Version:** 1.2  
-**Status:** Completed — Updated after Phase 2/3 and subsequent product decisions  
+**Status:** Completed — Latest decisions consolidated 2026-11-17  
 **Project Type:** Learning Management System (LMS)  
 **Architecture:** To be defined in later phases
 
@@ -625,16 +625,7 @@ Exam questions are randomized.
 
 Answer options are also randomized.
 
-However, once an attempt starts, the student must continue seeing the same:
-
-- Questions
-- Question order
-- Options
-- Option order
-
-for that specific attempt.
-
-This is especially important when an exam attempt is resumed after a connection failure.
+Randomization is applied when exam content is delivered. The system does not persist a per-attempt question/option ordering. Therefore, preserving the exact randomized display order after reconnect is not a database requirement in the current design.
 
 ---
 
@@ -658,7 +649,7 @@ Resume Same Attempt
 
 Student answers should be persisted during the exam rather than waiting until final submission.
 
-The exact save strategy will be designed during the Architecture and Implementation phases.
+Create and persist one answer record for every question when an attempt starts. The answer fields begin as NULL until the student answers; this distinguishes unanswered questions from answered-but-wrong questions.
 
 ---
 
@@ -689,14 +680,14 @@ Student
     └── ...
 ```
 
-The academic history should allow the system to determine:
+The academic record should allow the system to determine:
 
-- All exam attempts.
-- Exam scores.
+- Exam attempts and current scores.
 - Question-level answers/results.
-- Essay grader.
-- Grading time.
-- Grade changes/regrading history where applicable.
+- The latest Essay grader and grading time, where applicable.
+- Assignment's latest submission and its current review status.
+
+Previous Essay grading results are not retained as a regrading history. Regrading updates the current result.
 
 The academic record remains available because Courses are not deleted or archived in the product.
 
@@ -887,7 +878,7 @@ The following decisions are currently established:
 41. Students get one exam attempt.
 42. Exams can auto-submit when their time expires.
 43. Exam questions and options are randomized.
-44. Randomization remains fixed for an active attempt.
+44. Randomized question/option order is not persisted per attempt.
 45. Exam attempts can be resumed after connection/device failure.
 46. An exam is passed at a final score of at least 50% of the total exam score.
 47. Exams containing essays can remain pending manual grading after submission.
@@ -912,7 +903,7 @@ Phase 1 is considered complete when:
 - Major product assumptions are documented.
 - No database schema or implementation decisions are required to understand the product.
 
-**Phase 1 Status: COMPLETE — Version 1.2**
+**Phase 1 Status: COMPLETE — Version 1.3**
 
 ---
 
@@ -966,29 +957,47 @@ Phase 3 will be used to formally define the rules, invariants, edge cases, and c
 
 ## Development Process
 
-The complete project process is:
+The agreed project process is:
 
 ```text
-Phase 1 — Product Definition
+Phase 1 — Product Definition                 COMPLETE
         ↓
-Phase 2 — Requirements & Use Cases
+Phase 2 — Requirements & Use Cases            COMPLETE
         ↓
-Phase 3 — Business Rules
+Phase 3 — Business Rules                     COMPLETE
         ↓
-Phase 4 — Domain + Database Design
+Phase 4 — Domain + Database Design           COMPLETE
         ↓
-Phase 5 — Architecture
+Phase 5 — Architecture                       COMPLETE
         ↓
-Phase 6 — API Design
+Implementation                               CURRENT
+        ├── Feature-level API design as needed
+        ├── Backend implementation
+        ├── Unit tests alongside business logic
+        ├── Integration tests for DB/transactions
+        └── Feature review
         ↓
-Phase 7 — Implementation
-        ├── Unit Testing
-        ├── Integration Testing
-        └── Feature Review
+System Testing + Deployment
         ↓
-Phase 8 — Testing + Deployment
+Monitoring / Improvements
 ```
 
-Testing is not postponed until the end.
+There is no standalone API Design phase. API routes, request/response contracts, and endpoint behavior will be designed as part of implementing each feature. Testing is not postponed until the end; meaningful tests are added alongside implementation.
 
-**Unit testing will be performed during Implementation alongside the business logic being developed.**
+
+---
+
+## Latest Confirmed Decisions — 2026-11-17
+
+This section supersedes any conflicting earlier wording in this document. It records decisions confirmed after the original phase review.
+
+- **Project status:** Product definition, requirements, business rules, domain/database design, and architecture are complete enough to begin implementation. The project is now in **Implementation**. There is no separate API Design phase/gate. API contracts and endpoint details will be designed incrementally as each feature is implemented, after reviewing that feature's requirements and business rules.
+- **Exam randomization:** Questions and options are randomized, but their per-attempt display order is **not persisted**. Do not create `exam_attempt_questions` or `exam_attempt_options` tables. The database does not promise that the same randomized order will be restored after reconnect.
+- **Essay grading:** Keep only the current grading result. Regrading updates the current result; do not create `exam_answer_grading_history` or retain previous grading snapshots. The latest grader/time may be stored with the current answer if required by the implementation, but no grading-history timeline is maintained.
+- **Exam answers:** Create one `exam_answers` row for every question when an attempt starts. Initially the answer fields may be NULL. This makes unanswered questions distinguishable from answered-but-wrong questions.
+- **Exam pass rule:** Passing score is fixed at 50% of the exam's total marks. It is not a configurable per-exam field in the current schema.
+- **Question schema:** The current table names are `assessment_questions` and `assessment_options`, not `exam_questions` and `exam_options`.
+- **Assignment submissions:** Keep one current submission per (`assignment_id`, `enrollment_id`). Resubmission replaces/updates that row; no submission-version history. `is_late` is derived from `submitted_at` and the assignment's immutable `due_at`, not stored as an independent fact.
+- **Cancellation request withdrawal:** A Student may withdraw only a `PENDING` request; withdrawal physically deletes that request. There is no `WITHDRAWN` status. The stored statuses are `PENDING`, `APPROVED`, and `REJECTED`.
+- **Current database baseline:** The available migration set contains 22 migrations, ending with `022_create_exam_answers.sql`. The migrations are the source of truth for what is currently implemented in PostgreSQL; conceptual requirements in these documents remain the source of truth for intended behavior. Any gap between them must be tracked explicitly rather than assumed implemented.
+

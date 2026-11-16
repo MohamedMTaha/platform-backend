@@ -15,7 +15,7 @@
 | BR-306 | The student does not receive a separate view of previous cancelled Enrollment details after re-enrollment; administrative users may inspect them. Student access to the academic record remains as defined in Phase 2. |
 | BR-307 | A Payment Attempt uses the course price captured when that attempt was created, even if the catalog price changes before confirmation. Payment confirmation must match the attempt amount. |
 | BR-308 | Resetting an in-progress Exam Attempt invalidates/closes the old attempt and retains it in history; the reset creates a distinct new opportunity. Reset authorization, reason, audit, and idempotency remain required. |
-| BR-309 | Regrading an already finalized Essay result is permitted through an authorized workflow, preserving prior grading results, actor, and time in mandatory regrading history. Exact permissions are deferred. |
+| BR-309 | Regrading an Essay result updates the current grading result. Previous grading results are not retained in a separate history table. |
 | BR-310 | Deactivating an Assistant does not reverse grading decisions already successfully committed. Subsequent actions require an active Assistant account. |
 | BR-311 | Assignment and Exam definitions are immutable immediately after creation. No versions, edits, or deletion; create a new item to correct a mistake. |
 | BR-312 | Video and File Learning Items are immutable after creation but may be hard-deleted after all prerequisite dependents are removed. Their Learning Progress records are deleted with the item. |
@@ -42,8 +42,8 @@
 - MCQ/True-False are auto-graded; Essay is manually graded.
 - If Essay grading is pending, final score/pass/fail remains hidden and the Exam Learning Item is not complete.
 - Passing score is 50%. Server time is authoritative; expiry auto-submits saved answers, including if the student disconnects.
-- Questions and options are randomized at attempt start; the same attempt retains its exact question and option order after reconnect. Persist the per-attempt ordering.
-- Essay regrading is allowed through an authorized workflow; prior result, actor, and timestamp must be preserved in grading history.
+- Questions and options are randomized, but per-attempt display order is not persisted. The database does not guarantee restoration of the same order after reconnect.
+- Essay regrading updates the current result; no previous-result history is retained. The current grader/time may be recorded with the current answer.
 
 ## D. Video/File deletion rules
 
@@ -72,7 +72,18 @@
 - Assistant actions requiring audit and their business changes must commit atomically. Audit records are append-only.
 - Concurrent state transitions must be guarded; no last-write-wins for decisions.
 
-## G. Deferred details
+## G. Cancellation request rules
+
+- Cancellation request states are `PENDING`, `APPROVED`, and `REJECTED`. There is no `WITHDRAWN` state.
+- A Student may withdraw their own request only while it is `PENDING`. Withdrawal physically deletes the request record; no historical row is retained for a student-withdrawn request.
+- The deletion must be conditional on the request still being `PENDING`. A request that has already been `APPROVED` or `REJECTED` cannot be deleted through the student withdrawal flow.
+- After a pending request is deleted, the Student may create a new cancellation request for the same Enrollment.
+- Admin/Assistant may approve or reject a pending request. A rejected request remains in the system; a later request may be created.
+- At most one `PENDING` cancellation request may exist per Enrollment.
+- An `APPROVED` request blocks new cancellation requests and repurchase while cancellation/refund processing is in progress. Approval alone does not cancel the Enrollment or revoke access. Once the Enrollment becomes `CANCELLED`, access is revoked.
+- A direct Assistant cancellation remains a separate flow: it immediately cancels the Enrollment/revokes access and requires a mandatory reason. Refund handling is separate.
+
+## H. Deferred details
 
 | ID | Topic | Current handling |
 |---|---|---|
@@ -81,6 +92,24 @@
 | D-304 | Exact technical schema for price snapshots, attempt reset idempotency, and invalidated attempts | Define during database/implementation design. |
 | D-305 | Operational details for object-storage cleanup retries | Define during storage implementation; the database-backed outbox requirement is established. |
 
-## H. Phase 3 exit decision
+## I. Phase 3 exit decision
 
-Phase 3 remains COMPLETE. The rules above are the active behavioral baseline for Phase 4 database design and implementation. Historical versioning and archival decisions superseded by BR-303 and BR-311 through BR-314 must not be implemented.
+Phase 3 remains COMPLETE. The active rules in this document are the behavioral baseline for implementation. The latest confirmed decisions at the end of this document supersede any conflicting earlier review notes.
+
+
+---
+
+## Latest Confirmed Decisions — 2026-11-17
+
+This section supersedes any conflicting earlier wording in this document. It records decisions confirmed after the original phase review.
+
+- **Project status:** Product definition, requirements, business rules, domain/database design, and architecture are complete enough to begin implementation. The project is now in **Implementation**. There is no separate API Design phase/gate. API contracts and endpoint details will be designed incrementally as each feature is implemented, after reviewing that feature's requirements and business rules.
+- **Exam randomization:** Questions and options are randomized, but their per-attempt display order is **not persisted**. Do not create `exam_attempt_questions` or `exam_attempt_options` tables. The database does not promise that the same randomized order will be restored after reconnect.
+- **Essay grading:** Keep only the current grading result. Regrading updates the current result; do not create `exam_answer_grading_history` or retain previous grading snapshots. The latest grader/time may be stored with the current answer if required by the implementation, but no grading-history timeline is maintained.
+- **Exam answers:** Create one `exam_answers` row for every question when an attempt starts. Initially the answer fields may be NULL. This makes unanswered questions distinguishable from answered-but-wrong questions.
+- **Exam pass rule:** Passing score is fixed at 50% of the exam's total marks. It is not a configurable per-exam field in the current schema.
+- **Question schema:** The current table names are `assessment_questions` and `assessment_options`, not `exam_questions` and `exam_options`.
+- **Assignment submissions:** Keep one current submission per (`assignment_id`, `enrollment_id`). Resubmission replaces/updates that row; no submission-version history. `is_late` is derived from `submitted_at` and the assignment's immutable `due_at`, not stored as an independent fact.
+- **Cancellation request withdrawal:** A Student may withdraw only a `PENDING` request; withdrawal physically deletes that request. There is no `WITHDRAWN` status. The stored statuses are `PENDING`, `APPROVED`, and `REJECTED`.
+- **Current database baseline:** The available migration set contains 22 migrations, ending with `022_create_exam_answers.sql`. The migrations are the source of truth for what is currently implemented in PostgreSQL; conceptual requirements in these documents remain the source of truth for intended behavior. Any gap between them must be tracked explicitly rather than assumed implemented.
+
