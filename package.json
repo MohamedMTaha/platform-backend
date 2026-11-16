@@ -4,9 +4,12 @@
   "description": "",
   "main": "src/server.ts",
   "scripts": {
-    "dev": "node --watch src/server.ts",
-    "test-db": "node src/scripts/test-db.ts",
-    "migrate": "node src/scripts/migrate.ts"
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test-db": "tsx src/scripts/test-db.ts",
+    "migrate": "tsx src/scripts/migrate.ts"
   },
   "repository": {
     "type": "git",
@@ -28,6 +31,8 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
-    "@types/pg": "^8.23.1"
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }
