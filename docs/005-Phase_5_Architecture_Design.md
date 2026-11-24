@@ -69,15 +69,15 @@ Microservices are not part of the current architecture.
 
 The proposed modules are:
 
-| Module            | Responsibility                                                         |
-| ----------------- | ---------------------------------------------------------------------- |
-| Identity & Access | Authentication, user accounts, roles, and account status               |
-| Course Catalog    | Educational stages, courses, lectures, Learning Items, and course publishing  |
-| Payments          | Payment attempts, payment provider integration, and webhook processing |
-| Enrollments       | Student enrollment and enrollment-related business rules               |
-| Learning          | Learning access, lesson progress, and completion                       |
-| Assessment        | Exams, questions, attempts, assignments, submissions, and grading      |
-| Audit             | Required business audit records                                        |
+| Module            | Responsibility                                                               |
+| ----------------- | ---------------------------------------------------------------------------- |
+| Identity & Access | Authentication, user accounts, roles, and account status                     |
+| Course Catalog    | Educational stages, courses, lectures, Learning Items, and course publishing |
+| Payments          | Payment attempts, payment provider integration, and webhook processing       |
+| Enrollments       | Student enrollment and enrollment-related business rules                     |
+| Learning          | Learning access, lesson progress, and completion                             |
+| Assessment        | Exams, questions, attempts, assignments, submissions, and grading            |
+| Audit             | Required business audit records                                              |
 
 These boundaries represent the current logical design. They can be adjusted if implementation reveals a genuine domain-boundary problem.
 
@@ -130,91 +130,181 @@ Split or extend shared components when repeated needs or clear architectural ben
 
 ## 5. Authentication and Authorization
 
-### 5.1 Authentication
+### 5.1 Authentication Model
 
-The application will use:
+The application uses short-lived JWT Access Tokens and opaque Refresh Tokens.
 
-- Access Tokens.
-- Refresh Tokens.
+| Concern                      | Decision                                                    |
+| ---------------------------- | ----------------------------------------------------------- |
+| Access token                 | Signed JWT                                                  |
+| Access token lifetime        | 15 minutes                                                  |
+| Refresh token                | Cryptographically random opaque token                       |
+| Refresh token lifetime       | 7 days, absolute from session creation                      |
+| Refresh token storage        | Hash only; never persist the raw token                      |
+| Refresh token rotation       | Rotate after every successful refresh                       |
+| Active sessions              | One active session per user account                         |
+| New login                    | Revoke the existing session and create a new one            |
+| Access token client storage  | In-memory on the frontend                                   |
+| Refresh token client storage | HttpOnly, Secure cookie with an appropriate SameSite policy |
 
-Access Tokens will be short-lived.
+The Access Token contains only the claims needed by the backend, including:
 
-Refresh Tokens will allow users to obtain new Access Tokens without repeatedly logging in.
+- `sub`: user ID.
+- `role`: current role at token issuance (authorization still checks current account state and applicable permissions).
+- `sid`: session ID.
+- `iat` and `exp`: issued-at and expiration timestamps.
 
-The following details will be finalized during Authentication implementation:
+Do not include passwords, national IDs, phone numbers, or other unnecessary personal data in JWT claims.
 
-- Token expiration values.
-- Refresh Token storage.
-- Token rotation.
-- Token revocation.
-- Logout behavior.
+### 5.2 Session Management
 
-### 5.2 Account Status Validation
+A user may have at most one active session at a time.
 
-The application must not rely on JWT validity alone to determine whether an account is allowed to access protected resources.
+When a user successfully logs in from another device/browser:
+
+1. Revoke the user's previous active session, if one exists.
+2. Create a new session.
+3. Issue a new Access Token and Refresh Token for the new session.
+4. The previous device is no longer authorized, even if its Access Token has not reached its `exp` time.
+
+The database must enforce the one-active-session invariant, and the login operation must use a transaction and appropriate row-level locking to serialize concurrent login attempts for the same user.
+
+A session has an absolute seven-day expiry. Refreshing tokens does not extend the session's absolute expiry. After expiry, the user must log in again.
+
+### 5.3 Refresh Token Rotation (Single-Hash Strategy)
+
+Each session stores only the hash of its **currently valid** Refresh Token. The database does not retain consumed-token history, and the application does not attempt to detect reuse of an old token.
+
+On every successful refresh:
+
+1. Hash the presented opaque token using SHA-256.
+2. Find and lock the session row matching that hash.
+3. Verify that the session is not revoked and has not expired.
+4. Generate a new cryptographically random Refresh Token.
+5. Replace `refresh_token_hash` with the hash of the new token and update `last_used_at`.
+6. Commit the transaction, then return the new raw token to the client in the HttpOnly cookie.
+
+After rotation, the previous token no longer matches the stored hash and cannot be used again. If an old token is presented, authentication fails; the system does not identify it as a replay event and does not revoke the session solely for that attempt.
+
+The read/lock/validate/update sequence must run in one database transaction. Concurrent refresh requests using the same token must not both succeed. A request that waits for another refresh to commit will no longer find a row matching the old hash and must fail authentication.
+
+The Refresh Token lifetime is absolute: rotation does not change the session's `expires_at`.
+
+### 5.4 Session Database Schema
+
+The MVP uses **one table only: `user_sessions`**. There is no `refresh_tokens` table and no token-history table.
+
+| Column | PostgreSQL type | Null? | Rules / purpose |
+|---|---|---:|---|
+| `id` | `UUID` | NO | Primary key; generated by the backend when a session is created. Also used as the JWT `sid` claim. |
+| `user_id` | Same type as `users.id` | NO | FK to `users(id)`; identifies the owner. Use the exact existing `users.id` type in the migration. |
+| `refresh_token_hash` | `VARCHAR(64)` | NO | SHA-256 hash encoded as 64 lowercase hexadecimal characters; only the current token hash is stored. |
+| `expires_at` | `TIMESTAMPTZ` | NO | Absolute session expiry, set to creation time + 7 days and never extended by refresh. |
+| `revoked_at` | `TIMESTAMPTZ` | YES | NULL while not revoked; set when logout, replacement login, ban, or assistant deactivation revokes the session. |
+| `created_at` | `TIMESTAMPTZ` | NO | Defaults to `CURRENT_TIMESTAMP`. |
+| `last_used_at` | `TIMESTAMPTZ` | YES | Updated after each successful refresh; NULL until the first refresh. |
+
+Required database constraints and indexes:
+
+- Primary key on `id`.
+- Foreign key `user_id -> users(id)`; do not cascade-delete users because the current product has no account-deletion workflow.
+- Unique constraint on `refresh_token_hash`, so one token hash cannot identify multiple sessions.
+- Check that `refresh_token_hash` contains exactly 64 lowercase hexadecimal characters.
+- Check that `expires_at > created_at`.
+- Partial unique index on `user_id WHERE revoked_at IS NULL`, enforcing at most one non-revoked session per user.
+
+The partial unique index intentionally does not consider `expires_at`. Therefore, Login must revoke any existing non-revoked session for that user, including an expired one, before inserting the new session. Protected-request and refresh validation must check both `revoked_at IS NULL` and `expires_at > CURRENT_TIMESTAMP`.
+
+No separate index on `expires_at` is required for the initial MVP. Add one only if session cleanup/operations later demonstrate a query-performance need.
+
+### 5.5 Protected Request Validation
+
+JWT signature and expiry validation are necessary but not sufficient.
+
+For each protected request, the backend must:
+
+1. Verify the Access Token signature, allowed algorithm, and expiry.
+2. Read the user ID (`sub`) and session ID (`sid`) from the verified claims.
+3. Verify that the referenced session belongs to that user, is not revoked, and has not expired.
+4. Verify the current account status from PostgreSQL.
+5. Continue to authorization checks only after authentication succeeds.
+
+This makes a previous device's Access Token unusable immediately after its session is revoked, rather than waiting up to 15 minutes for token expiry.
+
+### 5.6 Account Status Enforcement
+
+The application must not rely on JWT validity alone to determine whether an account may access protected resources.
 
 The current account status will be checked against PostgreSQL on protected requests.
 
 Examples:
 
 - A banned student must lose access even if their Access Token has not expired.
-- A deactivated assistant must not be allowed to perform new actions.
+- A deactivated assistant must not perform new actions.
+- When a banned student is unbanned, the student must log in again; the old session remains revoked.
 
-This introduces an additional database lookup, but provides more reliable account-status enforcement.
+### 5.7 Logout and Session Revocation
 
-This approach can be reconsidered later if measured performance requirements justify a different design.
+- `Logout`: revoke the current session and clear the Refresh Token cookie.
+- `Logout All`: revoke all sessions for the user (retained as an administrative/security operation even though the MVP permits only one active session).
+- New login: revoke the previous session before creating the new one.
+- Ban/deactivation: revoke the affected user's active session as part of the status-changing operation where applicable.
 
-### 5.3 Authorization
+A revoked session invalidates all Access Tokens carrying its session ID.
 
-Authorization will use two levels.
+### 5.8 Cookie and CSRF Security
 
-**Level 1: Express middleware**
+The Refresh Token cookie must be `HttpOnly` and `Secure` in production, with a deliberate `SameSite` setting and a narrow path/domain scope where practical.
 
-Express middleware will handle:
+Because browsers attach cookies automatically, cookie-authenticated endpoints (especially refresh and logout) must have CSRF protection appropriate to the deployment topology. CORS configuration alone is not a CSRF defense. The exact cookie domain, SameSite mode, and CSRF mechanism will be finalized when frontend/backend origins and deployment are configured.
 
-- Authentication/token verification.
+The frontend keeps the Access Token in memory and sends it in the `Authorization: Bearer` header. Do not store the Refresh Token in `localStorage` or expose it to JavaScript.
+
+### 5.9 Password Handling and Login Responses
+
+Passwords must be stored using a suitable password-hashing algorithm (Argon2id preferred; bcrypt is an acceptable alternative when configured appropriately). Never store plaintext passwords or reversible password encryption.
+
+Login failures must not reveal whether a phone number/account exists. Return a generic invalid-credentials response for unknown users and incorrect passwords. Account-state failures must not disclose sensitive internal details.
+
+### 5.10 Authorization
+
+Authorization uses two levels.
+
+**Level 1: HTTP middleware**
+
+Middleware handles:
+
+- Authentication and token/session verification.
 - Coarse role-based access checks.
 
 The main roles are:
 
-- ADMIN
-- ASSISTANT
-- STUDENT
+- `ADMIN`
+- `ASSISTANT`
+- `STUDENT`
 
-**Level 2: Service-Level Authorization**
+**Level 2: Service-level authorization**
 
-Services will handle contextual and resource-level authorization.
-
-Examples:
+Services handle contextual and resource-level authorization, including:
 
 - Checking whether a student is enrolled in a course.
-- Checking whether a user is allowed to access a lesson.
-- Checking whether an assistant can perform an operation under the current account state.
+- Checking whether a user may access a lesson.
+- Checking whether an assistant may perform an operation under the current account state.
 - Checking resource ownership and business conditions.
 
-This separation helps prevent IDOR/BOLA vulnerabilities.
+A valid role does not automatically grant access to every resource. This separation helps prevent IDOR/BOLA vulnerabilities.
 
-A valid role does not automatically mean permission to access every resource.
+### 5.11 Deferred Authentication Details
 
-### 5.4 Course Access
+The following are implementation/API-level details, not reasons to delay the core design:
 
-Course access decisions belong to the relevant business services.
+- Exact response/error contract and endpoint payloads.
+- Cookie domain, path, SameSite mode, and CSRF mechanism based on deployment origins.
+- Password reset flow and its token lifecycle.
+- Rate limits and operational thresholds for login/refresh attempts.
+- Device metadata collection, if a real product requirement emerges. Device fingerprinting is not part of the MVP.
 
-If the same access rules are repeated across multiple modules, a small shared access service may be introduced.
-
-Do not move all resource authorization into Guards.
-
-### 5.5 Password Reset
-
-The exact password-reset flow will be designed during Authentication implementation.
-
-It must include:
-
-- Secure, short-lived reset tokens.
-- Single-use tokens.
-- Protection against account enumeration.
-
----
+The single-session rule prevents simultaneous sessions, but cannot prevent a student from sharing credentials and taking turns using the account. Additional abuse detection is deferred unless product evidence justifies it.
 
 ## 6. Database Access, Transactions, and Consistency
 
@@ -498,19 +588,19 @@ Docker can be reconsidered later if a real development or deployment need appear
 
 The following technologies or features will not be introduced without a real requirement.
 
-| Item                                        | Decision                                       |
-| ------------------------------------------- | ---------------------------------------------- |
-| Redis                                       | Deferred until a real use case exists          |
-| General Background Jobs / Workers            | Deferred; a lightweight processor is required only for storage-cleanup outbox tasks |
-| WebSockets                                  | Not included initially                         |
-| Microservices                               | Not included                                   |
-| Docker                                      | Not used initially                             |
-| Operational Logging                         | Explicitly excluded from current scope         |
-| Multi-tenancy                               | Deferred                                       |
-| Wallet                                      | Not included in the current payment design     |
-| Certificates                                | Deferred                                       |
-| Notifications                               | Deferred                                       |
-| Course-specific assistant permission matrix | Not included initially                         |
+| Item                                        | Decision                                                                            |
+| ------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Redis                                       | Deferred until a real use case exists                                               |
+| General Background Jobs / Workers           | Deferred; a lightweight processor is required only for storage-cleanup outbox tasks |
+| WebSockets                                  | Not included initially                                                              |
+| Microservices                               | Not included                                                                        |
+| Docker                                      | Not used initially                                                                  |
+| Operational Logging                         | Explicitly excluded from current scope                                              |
+| Multi-tenancy                               | Deferred                                                                            |
+| Wallet                                      | Not included in the current payment design                                          |
+| Certificates                                | Deferred                                                                            |
+| Notifications                               | Deferred                                                                            |
+| Course-specific assistant permission matrix | Not included initially                                                              |
 
 The project should remain focused on its actual business requirements.
 
@@ -520,18 +610,18 @@ Technologies should solve real problems rather than being added only to increase
 
 ## 14. Architecture Risks and Guardrails
 
-| Risk                                      | Architectural Guardrail                                  |
-| ----------------------------------------- | -------------------------------------------------------- |
-| Business logic leaking into Controllers   | Keep business rules in Services                          |
-| Modules becoming tightly coupled          | Communicate through module services/interfaces           |
-| Unauthorized resource access              | Perform resource-level authorization in Services         |
-| Invalid account retaining access          | Check current account status in PostgreSQL               |
-| Duplicate payment processing              | Webhook idempotency and safe state transitions           |
+| Risk                                      | Architectural Guardrail                                     |
+| ----------------------------------------- | ----------------------------------------------------------- |
+| Business logic leaking into Controllers   | Keep business rules in Services                             |
+| Modules becoming tightly coupled          | Communicate through module services/interfaces              |
+| Unauthorized resource access              | Perform resource-level authorization in Services            |
+| Invalid account retaining access          | Check current account status in PostgreSQL                  |
+| Duplicate payment processing              | Webhook idempotency and safe state transitions              |
 | Inconsistent payment and enrollment data  | Use a shared PostgreSQL transaction through one `pg` client |
-| Missing required audit records            | Insert audit records atomically with business operations |
-| Concurrent requests causing invalid state | Use constraints, transactions, and atomic operations     |
-| Storage provider lock-in                  | Keep a small storage abstraction                         |
-| Unnecessary infrastructure complexity     | Introduce technologies only when justified               |
+| Missing required audit records            | Insert audit records atomically with business operations    |
+| Concurrent requests causing invalid state | Use constraints, transactions, and atomic operations        |
+| Storage provider lock-in                  | Keep a small storage abstraction                            |
+| Unnecessary infrastructure complexity     | Introduce technologies only when justified                  |
 
 ---
 
@@ -555,35 +645,18 @@ Phase 5 is considered complete when:
 
 ---
 
-## Current Phase: Implementation
+## Next Phase: Implementation
 
-**Phase 5 is complete. The project is now in Implementation. There is no separate API Design phase.**
+Implementation will proceed feature by feature.
 
-Implementation will proceed feature by feature. For each feature:
+For each feature, we will:
 
-1. Re-read the relevant requirements and business rules.
-2. Identify edge cases, authorization requirements, and failure scenarios.
-3. Design the required API contract for this feature (routes, inputs, outputs, and errors) only as much as needed to implement it.
-4. Implement the business logic and persistence.
-5. Add unit/integration tests for meaningful behavior.
-6. Review data consistency, security, failure handling, and tradeoffs.
+1. Review its requirements and business rules.
+2. Identify edge cases and failure scenarios.
+3. Design its API.
+4. Implement the required backend behavior.
+5. Implement database interactions and transactions.
+6. Write meaningful tests.
+7. Review the implementation and its tradeoffs.
 
-API design is part of feature implementation, not a standalone phase or a reason to delay coding. Architecture decisions may be revisited when implementation reveals a genuine issue, but changes must be intentional and documented.
-
-
----
-
-## Latest Confirmed Decisions — 2026-11-17
-
-This section supersedes any conflicting earlier wording in this document. It records decisions confirmed after the original phase review.
-
-- **Project status:** Product definition, requirements, business rules, domain/database design, and architecture are complete enough to begin implementation. The project is now in **Implementation**. There is no separate API Design phase/gate. API contracts and endpoint details will be designed incrementally as each feature is implemented, after reviewing that feature's requirements and business rules.
-- **Exam randomization:** Questions and options are randomized, but their per-attempt display order is **not persisted**. Do not create `exam_attempt_questions` or `exam_attempt_options` tables. The database does not promise that the same randomized order will be restored after reconnect.
-- **Essay grading:** Keep only the current grading result. Regrading updates the current result; do not create `exam_answer_grading_history` or retain previous grading snapshots. The latest grader/time may be stored with the current answer if required by the implementation, but no grading-history timeline is maintained.
-- **Exam answers:** Create one `exam_answers` row for every question when an attempt starts. Initially the answer fields may be NULL. This makes unanswered questions distinguishable from answered-but-wrong questions.
-- **Exam pass rule:** Passing score is fixed at 50% of the exam's total marks. It is not a configurable per-exam field in the current schema.
-- **Question schema:** The current table names are `assessment_questions` and `assessment_options`, not `exam_questions` and `exam_options`.
-- **Assignment submissions:** Keep one current submission per (`assignment_id`, `enrollment_id`). Resubmission replaces/updates that row; no submission-version history. `is_late` is derived from `submitted_at` and the assignment's immutable `due_at`, not stored as an independent fact.
-- **Cancellation request withdrawal:** A Student may withdraw only a `PENDING` request; withdrawal physically deletes that request. There is no `WITHDRAWN` status. The stored statuses are `PENDING`, `APPROVED`, and `REJECTED`.
-- **Current database baseline:** The available migration set contains 22 migrations, ending with `022_create_exam_answers.sql`. The migrations are the source of truth for what is currently implemented in PostgreSQL; conceptual requirements in these documents remain the source of truth for intended behavior. Any gap between them must be tracked explicitly rather than assumed implemented.
-
+Architecture decisions may be revisited when implementation reveals a genuine issue, but changes must be intentional and documented.
